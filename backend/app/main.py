@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.api.v1.speech import router as speech_router
 from app.api.v1.tts import router as tts_router
 from app.api.v1.presets import router as presets_router
+from app.services.stt_service import stt_service
 
 # Configure logging
 logging.basicConfig(
@@ -54,5 +55,6 @@ async def health_check():
         "status": "healthy",
         "groq_configured": bool(settings.GROQ_API_KEY),
         "gemini_configured": bool(settings.GEMINI_API_KEY),
-        "version": settings.VERSION
+        "version": settings.VERSION,
+        "stt_engine": stt_service.get_provider_info()
     }

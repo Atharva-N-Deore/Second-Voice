@@ -66,12 +66,13 @@ async def process_speech_audio_endpoint(
     context: Optional[str] = Form("General"),
     impairment_notes: Optional[str] = Form(""),
     speech_quirks: Optional[str] = Form(""),
+    client_transcript: Optional[str] = Form(None),
     generate_audio: Optional[bool] = Form(True),
     voice: Optional[str] = Form(None)
 ):
     """
     Full end-to-end pipeline:
-    Audio In -> STT (Whisper) -> Context Reconstructor (Llama 3) -> Neural TTS -> Structured Response + Audio Stream.
+    Audio In -> STT (Whisper/Client WebSpeech) -> Context Reconstructor (Llama 3 / Local Context Engine) -> Neural TTS -> Structured Response.
     """
     start_time = time.time()
     
@@ -83,20 +84,36 @@ async def process_speech_audio_endpoint(
     # 1. Speech to Text
     raw_transcript, stt_confidence = await stt_service.transcribe_audio(
         audio_bytes=audio_bytes,
-        filename=audio_file.filename or "recording.wav"
+        filename=audio_file.filename or "recording.wav",
+        client_transcript=client_transcript
     )
+
+    # Fallback to client transcript if STT model yielded empty text
+    if (not raw_transcript or raw_transcript.strip() in [".", ""]) and client_transcript and client_transcript.strip():
+        raw_transcript = client_transcript.strip()
+        stt_confidence = 0.95
 
     user_profile = {
         "notes": impairment_notes,
         "quirks": speech_quirks
     }
 
-    # 2. Context Reconstruction via LLM
-    result = await llm_service.reconstruct_speech(
-        raw_transcript=raw_transcript,
-        context=context or "General",
-        user_profile=user_profile
-    )
+    # 2. Context Reconstruction
+    if not raw_transcript or raw_transcript.strip() in [".", ""]:
+        result = {
+            "reconstructed_text": "Could you please repeat that? I did not hear clearly.",
+            "confidence": 0.4,
+            "detected_intent": "clarification",
+            "alternative_suggestions": ["Please say that again.", "I need a moment."],
+            "explanation": "No clear speech detected.",
+            "provider": "acoustic-clarification"
+        }
+    else:
+        result = await llm_service.reconstruct_speech(
+            raw_transcript=raw_transcript,
+            context=context or "General",
+            user_profile=user_profile
+        )
 
     # 3. Neural TTS synthesis
     audio_base64 = None
@@ -106,8 +123,10 @@ async def process_speech_audio_endpoint(
 
     total_latency = int((time.time() - start_time) * 1000)
 
+    combined_provider = f"{stt_service.last_provider}+{result.get('provider', 'local-context-engine')}"
+
     return ReconstructResponse(
-        raw_transcript=raw_transcript,
+        raw_transcript=raw_transcript or "No speech detected",
         reconstructed_text=result.get("reconstructed_text", raw_transcript),
         confidence=min(stt_confidence, result.get("confidence", 0.9)),
         detected_intent=result.get("detected_intent", "general"),
@@ -115,5 +134,5 @@ async def process_speech_audio_endpoint(
         explanation=result.get("explanation"),
         audio_base64=audio_base64,
         latency_ms=total_latency,
-        provider=result.get("provider", "secondvoice-engine")
+        provider=combined_provider
     )

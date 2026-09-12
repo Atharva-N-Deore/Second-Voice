@@ -10,3 +10,11 @@ edge-tts>=6.1.12
 numpy>=1.26.0
 python-dotenv>=1.0.1
 pytest>=8.0.0
+
+# Optional: Local Fine-Tuned Whisper-Base (LoRA) Inference Engine
+torch>=2.0.0
+transformers>=4.38.0
+peft>=0.9.0
+soundfile>=0.12.1
+librosa>=0.10.0
+accelerate>=0.28.0

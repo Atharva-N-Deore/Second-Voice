@@ -39,13 +39,17 @@ const API_BASE = '/api/v1';
 export async function processSpeechAudio(
   audioBlob: Blob,
   context: string,
-  profile: UserSpeechProfile
+  profile: UserSpeechProfile,
+  clientTranscript?: string
 ): Promise<ReconstructionResult> {
   const formData = new FormData();
   formData.append('audio_file', audioBlob, 'speech.webm');
   formData.append('context', context);
   formData.append('impairment_notes', profile.notes || '');
   formData.append('speech_quirks', profile.speechQuirks || '');
+  if (clientTranscript) {
+    formData.append('client_transcript', clientTranscript);
+  }
   formData.append('generate_audio', 'true');
   formData.append('voice', profile.voice || 'en-US-GuyNeural');
 
@@ -62,7 +66,7 @@ export async function processSpeechAudio(
     return await res.json();
   } catch (err) {
     console.warn('Backend unavailable, using client-side fallback engine:', err);
-    return getLocalClientFallback(context);
+    return getLocalClientFallback(context, clientTranscript);
   }
 }
 

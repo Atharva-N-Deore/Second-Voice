@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     GROQ_STT_MODEL: str = "whisper-large-v3-turbo"
     DEFAULT_TTS_VOICE: str = "en-US-GuyNeural"
 
+    # Custom Fine-Tuned Whisper Settings (LoRA Multi-Corpus Adapter)
+    USE_CUSTOM_WHISPER: bool = True
+    CUSTOM_WHISPER_WEIGHTS_DIR: str = str(
+        Path(__file__).resolve().parent.parent.parent.parent / "ai_experiments" / "second_voice_whisper_base_weights"
+    )
+    CUSTOM_WHISPER_BASE_MODEL: str = "openai/whisper-base"
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_PATH),
         env_file_encoding="utf-8",

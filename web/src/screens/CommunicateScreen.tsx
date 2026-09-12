@@ -23,6 +23,7 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
   const [voiceVolume, setVoiceVolume] = useState(80);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [activeContext, setActiveContext] = useState<string>('General');
+  const [inputSource, setInputSource] = useState<'voice' | 'keyboard'>('voice');
 
   // Active reconstructed utterance state
   const [activeItem, setActiveItem] = useState<ReconstructionResult>({
@@ -54,6 +55,7 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
     if (!isRecording) {
       try {
         setIsRecording(true);
+        setInputSource('voice');
         setFragmentInput('');
         setActiveItem((prev) => ({
           ...prev,
@@ -65,7 +67,6 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
           (vol) => setVolumeLevel(vol),
           (liveText) => {
             if (liveText && liveText.trim()) {
-              setFragmentInput(liveText);
               setActiveItem((prev) => ({
                 ...prev,
                 raw_transcript: liveText,
@@ -82,19 +83,22 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
       setIsRecording(false);
       setVolumeLevel(0);
       setIsProcessing(true);
+      setInputSource('voice');
       showToast('Processing speech & constructing sentence...');
 
       try {
         const { blob, transcript } = await recorder.stop();
-        const rawSpoken = transcript.trim() || fragmentInput.trim();
+        const spokenFromLive = (activeItem.raw_transcript && activeItem.raw_transcript !== 'Listening... speak now') ? activeItem.raw_transcript.trim() : '';
+        const rawSpoken = transcript.trim() || spokenFromLive || fragmentInput.trim();
 
         let result: ReconstructionResult;
 
-        // Try backend audio processing first
+        // Try backend audio processing with speech transcript forwarded
         if (blob && blob.size > 2000) {
-          result = await processSpeechAudio(blob, activeContext, profile);
-          // If backend STT hallucinated/returned empty but browser caught words, fallback to browser transcript
-          if ((!result.raw_transcript || result.raw_transcript === '.' || result.raw_transcript.trim() === '') && rawSpoken.length > 0) {
+          result = await processSpeechAudio(blob, activeContext, profile, rawSpoken);
+          // If backend STT did not recognize speech, but browser speech recognition caught real words, reconstruct real spoken words!
+          const isSTTUnrecognized = !result.raw_transcript || result.raw_transcript === 'No speech detected' || result.raw_transcript === '.' || result.raw_transcript.trim() === '';
+          if (isSTTUnrecognized && rawSpoken.length > 0) {
             result = await reconstructText(rawSpoken, activeContext, profile);
           }
         } else if (rawSpoken.length > 0) {
@@ -111,8 +115,12 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
           };
         }
 
+        if ((!result.raw_transcript || result.raw_transcript === 'No speech detected') && rawSpoken.length > 0) {
+          result.raw_transcript = rawSpoken;
+        }
+
         setActiveItem(result);
-        setFragmentInput(result.raw_transcript);
+        setFragmentInput('');
         if (onAddToHistory && result.reconstructed_text && result.raw_transcript !== 'No speech detected') {
           onAddToHistory(result);
         }
@@ -133,6 +141,7 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
     if (!fragmentInput.trim() || isProcessing) return;
     const text = fragmentInput.trim();
     setIsProcessing(true);
+    setInputSource('keyboard');
     showToast('Reconstructing sentence with AI...');
     try {
       const res = await reconstructText(text, activeContext, profile);
@@ -153,10 +162,6 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
 
   const handleInputChange = (val: string) => {
     setFragmentInput(val);
-    setActiveItem((prev) => ({
-      ...prev,
-      raw_transcript: val || 'Type or speak words...',
-    }));
   };
 
   const handleSpeak = (text: string, customAudioBase64?: string) => {
@@ -511,7 +516,7 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
               </span>
               <input
                 type="text"
-                placeholder={isRecording ? 'Hearing your voice live...' : "or type raw words e.g. 'hello i am karan'..."}
+                placeholder={isRecording ? 'Hearing your voice live...' : "Type words or fragments to reconstruct (e.g. 'cold water please')..."}
                 value={fragmentInput}
                 onChange={(e) => handleInputChange(e.target.value)}
                 disabled={isProcessing}
@@ -743,13 +748,13 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
                     textTransform: 'uppercase',
                   }}
                 >
-                  {isRecording ? '● LISTENING TO SPEECH:' : 'ACOUSTIC INPUT PHONEMES:'}
+                  {isRecording ? '● LISTENING TO SPEECH:' : inputSource === 'keyboard' ? '⌨️ TYPED INPUT WORDS:' : '🎤 ACOUSTIC SPEECH INPUT:'}
                 </span>
                 <span
                   className="material-symbols-outlined"
                   style={{ fontSize: '18px', color: isRecording ? '#dc2626' : '#93721b' }}
                 >
-                  mic
+                  {inputSource === 'keyboard' ? 'keyboard' : 'mic'}
                 </span>
               </div>
               <p

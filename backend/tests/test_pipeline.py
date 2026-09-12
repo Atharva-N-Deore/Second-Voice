@@ -22,8 +22,15 @@ async def test_llm_reconstruction_medical():
     assert "chest" in result["reconstructed_text"].lower()
     assert "pain" in result["reconstructed_text"].lower() or "hurt" in result["reconstructed_text"].lower()
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_stt_mock_fallback():
     text, score = await stt_service.transcribe_audio(b"fake-audio-bytes-for-test")
     assert len(text) > 0
     assert score > 0.5
+
+def test_custom_whisper_weights_detected():
+    assert stt_service.is_custom_whisper_available() is True
+    info = stt_service.get_provider_info()
+    assert info["custom_whisper_configured"] is True
+    assert "second_voice_whisper_base_weights" in info["custom_weights_path"]
+
