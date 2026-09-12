@@ -98,7 +98,7 @@ export function playAudioBase64(base64Data: string): Promise<void> {
   });
 }
 
-export function speakWithBrowserTTS(text: string): Promise<void> {
+export function speakWithBrowserTTS(text: string, volume: number = 80): Promise<void> {
   return new Promise((resolve) => {
     if (!('speechSynthesis' in window)) {
       resolve();
@@ -108,6 +108,7 @@ export function speakWithBrowserTTS(text: string): Promise<void> {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = 0.95; // Slightly clearer pace
     utterance.pitch = 1.0;
+    utterance.volume = Math.max(0, Math.min(1, volume / 100));
     utterance.onend = () => resolve();
     utterance.onerror = () => resolve();
     window.speechSynthesis.speak(utterance);
