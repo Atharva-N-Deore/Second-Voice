@@ -34,9 +34,25 @@ class STTService:
                     file=audio_file,
                     model=settings.GROQ_STT_MODEL,
                     response_format="verbose_json",
-                    temperature=0.0
+                    temperature=0.0,
+                    prompt="Speech assistance: words, introductions, greetings, questions."
                 )
                 text = transcription.text.strip()
+                
+                # Filter phantom Whisper hallucinations on silent/low-gain audio
+                hallucinations = [
+                    "i'm going to go to the next one",
+                    "thank you for watching",
+                    "thanks for watching",
+                    "subtitles by",
+                    "please subscribe",
+                    "."
+                ]
+                clean_lower = text.lower().strip()
+                if any(h in clean_lower for h in hallucinations) and len(clean_lower.split()) <= 8:
+                    logger.warning(f"Filtered phantom Whisper hallucination: '{text}'")
+                    text = ""
+
                 logger.info(f"Groq Whisper transcription completed in {time.time() - start_time:.2f}s: '{text}'")
                 return text, 0.95
             except Exception as e:

@@ -72,13 +72,13 @@ class LLMService:
                     messages=messages,
                     response_format={"type": "json_object"},
                     temperature=0.2,
-                    max_tokens=300
+                    max_tokens=2048
                 )
 
                 response_content = completion.choices[0].message.content
                 result = json.loads(response_content)
                 result["latency_ms"] = int((time.time() - start_time) * 1000)
-                result["provider"] = "groq-llama3"
+                result["provider"] = "groq-llm"
                 return result
             except Exception as e:
                 logger.error(f"Groq LLM call failed: {e}. Falling back to rule-based contextual repair.")

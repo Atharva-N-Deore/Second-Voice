@@ -41,8 +41,8 @@ export const PushToTalk: React.FC<PushToTalkProps> = ({
       setIsRecording(false);
       setVolumeLevel(0);
       try {
-        const audioBlob = await recorder.stop();
-        if (audioBlob.size > 0) {
+        const { blob: audioBlob } = await recorder.stop();
+        if (audioBlob && audioBlob.size > 0) {
           await onAudioRecorded(audioBlob);
         }
       } catch (err) {

@@ -6,38 +6,38 @@ interface CommunicateScreenProps {
   profile: UserSpeechProfile;
   onNavigateTab: (tab: string) => void;
   onOpenEmergency: () => void;
+  onAddToHistory?: (item: ReconstructionResult) => void;
 }
 
 export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
   profile,
   onNavigateTab,
   onOpenEmergency,
+  onAddToHistory,
 }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [volumeLevel, setVolumeLevel] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [recorder, setRecorder] = useState<AudioRecorder | null>(null);
   const [fragmentInput, setFragmentInput] = useState('');
-  
-  // Toast state
+  const [voiceVolume, setVoiceVolume] = useState(80);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [activeContext, setActiveContext] = useState<string>('General');
 
-  // Active reconstructed item state
+  // Active reconstructed utterance state
   const [activeItem, setActiveItem] = useState<ReconstructionResult>({
-    raw_transcript: 'meeting... late... tell Rahul...',
-    reconstructed_text: 'Please tell Rahul that I will be 10 minutes late to our morning sync.',
-    confidence: 0.96,
-    detected_intent: 'Send Message',
+    raw_transcript: 'hello i am karan',
+    reconstructed_text: 'Hello, I am Karan.',
+    confidence: 0.98,
+    detected_intent: 'Greeting & Introduction',
     alternative_suggestions: [
-      'I am running a few minutes late for the sync with Rahul.',
-      'Can you please let Rahul know I will join shortly?'
+      'Hi, my name is Karan.',
+      'Hello everyone, I am Karan.'
     ],
-    explanation: 'Mapped meeting tardiness fragments to active work colleague Rahul.',
-    latency_ms: 280,
+    explanation: 'Recognized speaker introduction and formatted polite greeting.',
+    latency_ms: 180,
     provider: 'Second Voice Neural Core'
   });
-
-  const [voiceVolume, setVoiceVolume] = useState(80);
 
   useEffect(() => {
     setRecorder(new AudioRecorder());
@@ -45,7 +45,7 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 2500);
+    setTimeout(() => setToastMessage(null), 2800);
   };
 
   const handleToggleRecord = async () => {
@@ -54,31 +54,74 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
     if (!isRecording) {
       try {
         setIsRecording(true);
-        showToast('Acoustic sensor calibrated. Listening...');
-        await recorder.start((vol) => setVolumeLevel(vol));
+        setFragmentInput('');
+        setActiveItem((prev) => ({
+          ...prev,
+          raw_transcript: 'Listening... speak now',
+        }));
+        showToast('Listening... Speak naturally or in fragments.');
+
+        await recorder.start(
+          (vol) => setVolumeLevel(vol),
+          (liveText) => {
+            if (liveText && liveText.trim()) {
+              setFragmentInput(liveText);
+              setActiveItem((prev) => ({
+                ...prev,
+                raw_transcript: liveText,
+              }));
+            }
+          }
+        );
       } catch (err) {
-        console.error('Mic error:', err);
+        console.error('Microphone error:', err);
         setIsRecording(false);
-        showToast('Microphone access denied or unavailable.');
+        showToast('Microphone access denied. You can type words directly below.');
       }
     } else {
       setIsRecording(false);
       setVolumeLevel(0);
       setIsProcessing(true);
-      showToast('Analyzing phonemes & constructing sentence...');
+      showToast('Processing speech & constructing sentence...');
+
       try {
-        const audioBlob = await recorder.stop();
-        if (audioBlob.size > 0) {
-          const result = await processSpeechAudio(audioBlob, 'Workplace & Meetings', profile);
-          setActiveItem(result);
-          showToast('Utterance reconstructed successfully!');
-          // Auto speak
-          if (result.reconstructed_text) {
-            handleSpeak(result.reconstructed_text);
+        const { blob, transcript } = await recorder.stop();
+        const rawSpoken = transcript.trim() || fragmentInput.trim();
+
+        let result: ReconstructionResult;
+
+        // Try backend audio processing first
+        if (blob && blob.size > 2000) {
+          result = await processSpeechAudio(blob, activeContext, profile);
+          // If backend STT hallucinated/returned empty but browser caught words, fallback to browser transcript
+          if ((!result.raw_transcript || result.raw_transcript === '.' || result.raw_transcript.trim() === '') && rawSpoken.length > 0) {
+            result = await reconstructText(rawSpoken, activeContext, profile);
           }
+        } else if (rawSpoken.length > 0) {
+          result = await reconstructText(rawSpoken, activeContext, profile);
+        } else {
+          result = {
+            raw_transcript: 'No speech detected',
+            reconstructed_text: 'Could you please repeat that? I did not hear clearly.',
+            confidence: 0.5,
+            detected_intent: 'clarification',
+            alternative_suggestions: ['Please say that again.'],
+            latency_ms: 100,
+            provider: 'secondvoice-core'
+          };
+        }
+
+        setActiveItem(result);
+        setFragmentInput(result.raw_transcript);
+        if (onAddToHistory && result.reconstructed_text && result.raw_transcript !== 'No speech detected') {
+          onAddToHistory(result);
+        }
+        showToast('Utterance reconstructed!');
+        if (result.reconstructed_text) {
+          handleSpeak(result.reconstructed_text, result.audio_base64);
         }
       } catch (e) {
-        console.error(e);
+        console.error('Reconstruction error:', e);
       } finally {
         setIsProcessing(false);
       }
@@ -88,15 +131,19 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
   const handleFragmentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!fragmentInput.trim() || isProcessing) return;
-    const text = fragmentInput;
-    setFragmentInput('');
+    const text = fragmentInput.trim();
     setIsProcessing(true);
-    showToast('Reconstructing sentence from fragments...');
+    showToast('Reconstructing sentence with AI...');
     try {
-      const res = await reconstructText(text, 'General', profile);
+      const res = await reconstructText(text, activeContext, profile);
       setActiveItem(res);
+      if (onAddToHistory && res.reconstructed_text) {
+        onAddToHistory(res);
+      }
       showToast('Sentence ready!');
-      handleSpeak(res.reconstructed_text);
+      if (res.reconstructed_text) {
+        handleSpeak(res.reconstructed_text, res.audio_base64);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -104,15 +151,24 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
     }
   };
 
-  const handleSpeak = (text: string) => {
-    if (activeItem.audio_base64) {
-      playAudioBase64(activeItem.audio_base64).catch(() => {
+  const handleInputChange = (val: string) => {
+    setFragmentInput(val);
+    setActiveItem((prev) => ({
+      ...prev,
+      raw_transcript: val || 'Type or speak words...',
+    }));
+  };
+
+  const handleSpeak = (text: string, customAudioBase64?: string) => {
+    const audioToPlay = customAudioBase64 !== undefined ? customAudioBase64 : activeItem.audio_base64;
+    if (audioToPlay) {
+      playAudioBase64(audioToPlay).catch(() => {
         speakWithBrowserTTS(text);
       });
     } else {
       speakWithBrowserTTS(text);
     }
-    showToast('Speaking aloud through high-fidelity speaker...');
+    showToast('Speaking aloud through neural voice...');
   };
 
   const handleCopy = () => {
@@ -122,683 +178,978 @@ export const CommunicateScreen: React.FC<CommunicateScreenProps> = ({
     }
   };
 
+  const handleRefine = () => {
+    if (activeItem?.reconstructed_text) {
+      setFragmentInput(activeItem.reconstructed_text);
+      showToast('Loaded into input box for editing.');
+    }
+  };
+
+  const handleRegenerate = async () => {
+    if (!activeItem?.raw_transcript || isProcessing) return;
+    setIsProcessing(true);
+    showToast('Regenerating alternative phrasing...');
+    try {
+      const res = await reconstructText(activeItem.raw_transcript, activeContext, profile);
+      setActiveItem(res);
+      showToast('New phrasing generated!');
+      handleSpeak(res.reconstructed_text, res.audio_base64);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   return (
-    <div style={{ maxWidth: '640px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
       
-      {/* Greeting & Status Banner */}
-      <section style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      {/* Top Greeting & Status Bar */}
+      <section style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
         <div>
-          <h1 style={{
-            fontFamily: 'var(--font-heading)',
-            fontSize: '24px',
-            fontWeight: 700,
-            color: 'var(--on-surface)',
-            lineHeight: 1.2
-          }}>
+          <h1
+            style={{
+              fontFamily: 'var(--font-heading)',
+              fontSize: '28px',
+              fontWeight: 800,
+              color: '#1a1a19',
+              lineHeight: 1.15,
+            }}
+          >
             Good morning, Alex
           </h1>
-          <p style={{
-            fontFamily: 'var(--font-body)',
-            fontSize: '14px',
-            color: 'var(--on-surface-variant)',
-            marginTop: '2px'
-          }}>
-            Your voice assistant is ready • Calibration: 87%
+          <p
+            style={{
+              fontFamily: 'var(--font-body)',
+              fontSize: '14px',
+              color: '#706a60',
+              marginTop: '4px',
+            }}
+          >
+            Your personalized neural voice assistant is active • Ambient calibration at 87%
           </p>
         </div>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-          backgroundColor: 'var(--tertiary-fixed)',
-          color: 'var(--on-tertiary-fixed-variant)',
-          padding: '4px 12px',
-          borderRadius: '999px',
-          fontWeight: 600,
-          fontSize: '12px',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.06)'
-        }}>
-          <span style={{
-            width: '8px',
-            height: '8px',
-            borderRadius: '50%',
-            backgroundColor: 'var(--tertiary)',
-            display: 'inline-block'
-          }} className="animate-pulse" />
-          <span>Engine Active</span>
+
+        {/* Right Status Badges */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {/* Engine Active Pill */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: '#d8eedc',
+              color: '#1a6428',
+              padding: '6px 14px',
+              borderRadius: '999px',
+              fontWeight: 700,
+              fontSize: '13px',
+            }}
+          >
+            <span
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: '#16a34a',
+                display: 'inline-block',
+              }}
+              className="animate-pulse"
+            />
+            <span>Engine Active</span>
+          </div>
+
+          {/* Voice Volume Pill */}
+          <button
+            onClick={() => setVoiceVolume(voiceVolume >= 100 ? 50 : voiceVolume + 20)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: '#ffffff',
+              color: '#1a1a19',
+              padding: '6px 14px',
+              borderRadius: '999px',
+              border: '1px solid #ede7df',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '13px',
+            }}
+            title="Adjust Neural Voice Volume"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#655e54' }}>
+              volume_up
+            </span>
+            <span>Voice: {voiceVolume}%</span>
+          </button>
         </div>
       </section>
 
-      {/* Top Quick Access Utility Bar (Emergency + Voice Level) */}
-      <section style={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: '10px' }}>
-        <button
-          onClick={onOpenEmergency}
-          aria-label="Emergency Mode"
-          style={{
-            gridColumn: 'span 8',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '12px 16px',
-            backgroundColor: 'var(--surface-container-lowest)',
-            borderRadius: '16px',
-            border: '1px solid var(--outline-variant)',
-            boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
-            cursor: 'pointer',
-            textAlign: 'left'
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{
-              width: '10px',
-              height: '10px',
-              borderRadius: '50%',
-              backgroundColor: 'var(--error)',
-              display: 'inline-block'
-            }} className="animate-ping" />
-            <span style={{
-              fontFamily: 'var(--font-heading)',
-              fontSize: '14px',
-              fontWeight: 700,
-              color: 'var(--error)',
-              letterSpacing: '-0.01em'
-            }}>
-              I NEED HELP
-            </span>
-          </div>
-          <span style={{ fontSize: '13px', color: 'var(--on-surface-variant)' }}>
-            Emergency Menu →
-          </span>
-        </button>
-
-        <button
-          onClick={() => setVoiceVolume(voiceVolume >= 100 ? 50 : voiceVolume + 25)}
-          aria-label="Speech Output Level"
-          style={{
-            gridColumn: 'span 4',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '6px',
-            padding: '12px 10px',
-            backgroundColor: 'var(--surface-container-lowest)',
-            borderRadius: '16px',
-            border: '1px solid var(--outline-variant)',
-            boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
-            cursor: 'pointer',
-            fontSize: '13px',
-            fontWeight: 600,
-            color: 'var(--on-surface)'
-          }}
-        >
-          <span className="material-symbols-outlined" style={{ fontSize: '20px', color: 'var(--primary)' }}>
-            volume_up
-          </span>
-          <span>Voice: {voiceVolume}%</span>
-        </button>
-      </section>
-
-      {/* Primary Speech Activation Zone */}
-      <section style={{
-        position: 'relative',
-        backgroundColor: 'var(--surface-container-lowest)',
-        borderRadius: '20px',
-        padding: '28px 20px',
-        textAlign: 'center',
-        boxShadow: '0 4px 16px rgba(119, 90, 1, 0.05)',
-        border: '1px solid var(--outline-variant)',
-        overflow: 'hidden'
-      }}>
-        {/* Ambient Gold Glows */}
-        <div style={{
-          position: 'absolute',
-          top: '-40px',
-          right: '-40px',
-          width: '140px',
-          height: '140px',
-          borderRadius: '50%',
-          backgroundColor: 'rgba(255, 223, 154, 0.35)',
-          filter: 'blur(30px)',
-          pointerEvents: 'none'
-        }} />
-        <div style={{
-          position: 'absolute',
-          bottom: '-40px',
-          left: '-40px',
-          width: '140px',
-          height: '140px',
-          borderRadius: '50%',
-          backgroundColor: 'rgba(253, 209, 127, 0.35)',
-          filter: 'blur(30px)',
-          pointerEvents: 'none'
-        }} />
-
-        {/* Microphone Button with Glow Rings */}
-        <div style={{
-          position: 'relative',
-          margin: '12px auto 16px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: '130px',
-          height: '130px'
-        }}>
-          {isRecording && (
-            <div style={{
-              position: 'absolute',
-              width: '130px',
-              height: '130px',
-              borderRadius: '50%',
-              backgroundColor: 'rgba(201, 164, 76, 0.35)',
-            }} className="animate-ping" />
-          )}
-
-          <div style={{
-            position: 'absolute',
-            width: '115px',
-            height: '115px',
-            borderRadius: '50%',
-            backgroundColor: 'rgba(253, 209, 127, 0.5)',
-          }} />
-
-          <button
-            id="micButton"
-            onClick={handleToggleRecord}
-            disabled={isProcessing}
-            aria-label="Tap to speak or hold for continuous listening"
+      {/* Main Responsive 2-Column Grid */}
+      <div className="communicate-workspace-grid">
+        
+        {/* LEFT COLUMN: Acoustic Tracking Zone + Quick Express */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+          
+          {/* Card 1: ACOUSTIC TRACKING ZONE */}
+          <section
             style={{
-              position: 'relative',
-              zIndex: 10,
-              width: '96px',
-              height: '96px',
-              borderRadius: '50%',
-              backgroundColor: isRecording ? 'var(--error)' : 'var(--primary-container)',
-              color: isRecording ? '#ffffff' : 'var(--on-primary-container)',
-              border: 'none',
-              cursor: isProcessing ? 'not-allowed' : 'pointer',
+              backgroundColor: '#ffffff',
+              borderRadius: '24px',
+              padding: '28px 24px',
+              border: '1px solid #ede7df',
+              boxShadow: '0 2px 12px rgba(119, 90, 1, 0.03)',
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: isRecording
-                ? '0 6px 24px rgba(186, 26, 26, 0.4)'
-                : '0 6px 20px rgba(119, 90, 1, 0.25)',
-              transition: 'transform 0.15s ease',
-              transform: isRecording ? `scale(${1 + volumeLevel * 0.2})` : 'scale(1)'
+              position: 'relative',
+              textAlign: 'center',
             }}
           >
-            <span className="material-symbols-outlined" style={{ fontSize: '42px', lineHeight: 1 }}>
-              {isRecording ? 'stop' : 'mic'}
-            </span>
-          </button>
-        </div>
+            {/* Header with Tracking tag & Matrix badge */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginBottom: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span
+                  style={{
+                    width: '8px',
+                    height: '8px',
+                    borderRadius: '50%',
+                    backgroundColor: isRecording ? '#dc2626' : '#c49a2c',
+                    display: 'inline-block',
+                  }}
+                  className={isRecording ? 'animate-ping' : ''}
+                />
+                <span
+                  style={{
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '11px',
+                    fontWeight: 800,
+                    letterSpacing: '0.08em',
+                    color: '#49443c',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {isRecording ? 'RECORDING VOICE PHONEMES' : 'ACOUSTIC TRACKING ZONE'}
+                </span>
+              </div>
 
-        <h2 style={{
-          fontFamily: 'var(--font-heading)',
-          fontSize: '20px',
-          fontWeight: 700,
-          color: 'var(--on-surface)',
-          marginBottom: '4px'
-        }}>
-          {isRecording ? 'Listening to speech...' : isProcessing ? 'Reconstructing...' : 'Tap to Speak'}
-        </h2>
-        <p style={{
-          fontFamily: 'var(--font-body)',
-          fontSize: '14px',
-          color: 'var(--on-surface-variant)',
-          marginBottom: '14px'
-        }}>
-          or hold for continuous acoustic tracking
-        </p>
+              <span
+                style={{
+                  backgroundColor: '#f5efe4',
+                  color: '#5b5449',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  padding: '4px 10px',
+                  borderRadius: '999px',
+                }}
+              >
+                Dual-Mic Matrix
+              </span>
+            </div>
 
-        {/* Dynamic Waveform Visualizer */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: '5px',
-          height: '28px',
-          maxWidth: '220px',
-          margin: '0 auto 16px'
-        }}>
-          {[...Array(9)].map((_, i) => (
-            <span
-              key={i}
+            {/* Central Glowing Listening Orb */}
+            <div
               style={{
-                width: '6px',
-                borderRadius: '999px',
-                backgroundColor: i % 2 === 0 ? 'var(--primary)' : 'var(--primary-container)',
-                height: isRecording
-                  ? `${Math.max(6, Math.sin(i + Date.now() / 150) * 22 * (volumeLevel + 0.3) + 8)}px`
-                  : `${(i % 3 + 1) * 6}px`,
-                transition: 'height 0.1s ease'
+                position: 'relative',
+                margin: '12px auto 16px',
+                width: '160px',
+                height: '160px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}
-            />
-          ))}
-        </div>
+            >
+              {/* Outer Golden Ambient Halo */}
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  borderRadius: '50%',
+                  background: isRecording
+                    ? 'radial-gradient(circle, rgba(254, 202, 202, 0.7) 0%, rgba(254, 226, 226, 0.3) 65%, transparent 100%)'
+                    : 'radial-gradient(circle, rgba(247, 219, 149, 0.6) 0%, rgba(253, 241, 209, 0.2) 65%, transparent 100%)',
+                  pointerEvents: 'none',
+                }}
+                className={isRecording ? 'animate-ping' : ''}
+              />
 
-        {/* Text Fallback Field */}
-        <form onSubmit={handleFragmentSubmit} style={{
-          display: 'flex',
-          alignItems: 'center',
-          backgroundColor: 'var(--surface-container-low)',
-          borderRadius: '12px',
-          padding: '4px 8px 4px 14px',
-          border: '1px solid var(--outline-variant)'
-        }}>
-          <input
-            type="text"
-            placeholder="or type fragmented thoughts..."
-            value={fragmentInput}
-            onChange={(e) => setFragmentInput(e.target.value)}
-            disabled={isProcessing}
-            style={{
-              flex: 1,
-              backgroundColor: 'transparent',
-              border: 'none',
-              outline: 'none',
-              fontFamily: 'var(--font-body)',
-              fontSize: '15px',
-              color: 'var(--on-surface)',
-              minHeight: '40px'
-            }}
-          />
-          <button
-            type="submit"
-            disabled={isProcessing || !fragmentInput.trim()}
-            style={{
-              width: '36px',
-              height: '36px',
-              borderRadius: '8px',
-              backgroundColor: 'var(--primary-container)',
-              color: 'var(--on-primary-container)',
-              border: 'none',
-              cursor: isProcessing || !fragmentInput.trim() ? 'default' : 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0
-            }}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>arrow_forward</span>
-          </button>
-        </form>
-      </section>
+              <div
+                style={{
+                  position: 'absolute',
+                  width: '140px',
+                  height: '140px',
+                  borderRadius: '50%',
+                  background: isRecording
+                    ? 'radial-gradient(circle, rgba(252, 165, 165, 0.5) 0%, rgba(254, 202, 202, 0.3) 70%, transparent 100%)'
+                    : 'radial-gradient(circle, rgba(235, 196, 105, 0.4) 0%, rgba(253, 236, 196, 0.2) 70%, transparent 100%)',
+                  pointerEvents: 'none',
+                }}
+              />
 
-      {/* Live AI Interpretation Card */}
-      {activeItem && (
-        <section style={{
-          backgroundColor: 'var(--surface-container-lowest)',
-          borderRadius: '20px',
-          padding: '18px',
-          boxShadow: '0 4px 16px rgba(119, 90, 1, 0.05)',
-          border: '1px solid var(--outline-variant)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px'
-        }}>
-          {/* Header with Badges */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span className="material-symbols-outlined" style={{ fontSize: '20px', color: 'var(--primary)' }}>
-                graphic_eq
-              </span>
-              <span style={{
-                fontFamily: 'var(--font-heading)',
-                fontSize: '14px',
-                fontWeight: 700,
-                color: 'var(--on-surface)'
-              }}>
-                Live Speech Detected
-              </span>
+              {/* Main Circular Microphone Orb */}
+              <button
+                id="mainMicOrb"
+                onClick={handleToggleRecord}
+                disabled={isProcessing}
+                style={{
+                  position: 'relative',
+                  zIndex: 10,
+                  width: '100px',
+                  height: '100px',
+                  borderRadius: '50%',
+                  backgroundColor: isRecording ? '#dc2626' : '#93721b',
+                  color: '#ffffff',
+                  border: 'none',
+                  cursor: isProcessing ? 'wait' : 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '4px',
+                  boxShadow: isRecording
+                    ? '0 8px 30px rgba(220, 38, 38, 0.45)'
+                    : '0 8px 26px rgba(147, 114, 27, 0.35)',
+                  transition: 'transform 0.15s ease, background-color 0.2s ease',
+                  transform: isRecording ? `scale(${1.06 + volumeLevel * 0.16})` : 'scale(1)',
+                }}
+                aria-label="Tap to speak"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '32px' }}>
+                  {isRecording ? 'stop' : 'mic'}
+                </span>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '9px',
+                    fontWeight: 800,
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    color: 'rgba(255, 255, 255, 0.95)',
+                  }}
+                >
+                  {isRecording ? 'STOP & PROCESS' : 'LISTENING'}
+                </span>
+              </button>
             </div>
-            <span style={{
-              backgroundColor: 'var(--secondary-fixed)',
-              color: 'var(--on-secondary-fixed)',
-              fontSize: '12px',
-              fontWeight: 600,
-              padding: '2px 10px',
-              borderRadius: '999px'
-            }}>
-              AI Confidence {Math.round(activeItem.confidence * 100)}%
-            </span>
-          </div>
 
-          {/* Detected Fragmented Speech */}
-          <div style={{
-            backgroundColor: 'var(--surface-container-low)',
-            padding: '12px 14px',
-            borderRadius: '12px'
-          }}>
-            <span style={{ fontSize: '11px', color: 'var(--on-surface-variant)', fontWeight: 600, textTransform: 'uppercase' }}>
-              Raw Speech Input:
-            </span>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '2px' }}>
-              <span style={{
+            {/* Title & Description */}
+            <h2
+              style={{
+                fontFamily: 'var(--font-heading)',
+                fontSize: '20px',
+                fontWeight: 800,
+                color: '#1a1a19',
+                marginBottom: '6px',
+              }}
+            >
+              {isRecording ? 'Listening to your voice...' : isProcessing ? 'Constructing Sentence with AI...' : 'Tap to Speak'}
+            </h2>
+            <p
+              style={{
                 fontFamily: 'var(--font-body)',
-                fontSize: '15px',
-                fontStyle: 'italic',
-                color: 'var(--on-surface-variant)'
-              }}>
-                “{activeItem.raw_transcript}”
-              </span>
-              <span className="material-symbols-outlined" style={{ fontSize: '18px', color: 'var(--primary)' }}>
-                mic_none
-              </span>
-            </div>
-          </div>
-
-          {/* Transformation Indicator */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{
-              width: '32px',
-              height: '32px',
-              borderRadius: '50%',
-              backgroundColor: 'rgba(201, 164, 76, 0.2)',
-              color: 'var(--primary)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center'
-            }}>
-              <span className="material-symbols-outlined animate-bounce" style={{ fontSize: '18px' }}>
-                arrow_downward
-              </span>
-            </div>
-          </div>
-
-          {/* Reconstructed Natural Sentence Display */}
-          <div style={{
-            backgroundColor: 'rgba(255, 223, 154, 0.3)',
-            padding: '16px',
-            borderRadius: '14px',
-            border: '1px solid rgba(201, 164, 76, 0.3)'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-              <span style={{
-                fontFamily: 'var(--font-heading)',
-                fontSize: '11px',
-                fontWeight: 700,
-                color: 'var(--on-primary-fixed-variant)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em'
-              }}>
-                Reconstructed Sentence
-              </span>
-              <span className="material-symbols-outlined" style={{ fontSize: '18px', color: 'var(--primary)' }}>
-                verified
-              </span>
-            </div>
-            <p style={{
-              fontFamily: 'var(--font-body)',
-              fontSize: '18px',
-              fontWeight: 600,
-              color: 'var(--on-surface)',
-              lineHeight: 1.45
-            }}>
-              “{activeItem.reconstructed_text}”
+                fontSize: '13px',
+                color: '#6e685e',
+                maxWidth: '420px',
+                lineHeight: 1.45,
+                marginBottom: '16px',
+              }}
+            >
+              Speak fragments, dysarthric syllables, or natural voice. The engine synthesizes intended sentences automatically.
             </p>
 
-            {/* Context & Metadata Chips */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '12px' }}>
-              <span style={{
-                backgroundColor: 'var(--surface-container-lowest)',
-                color: 'var(--on-surface)',
-                padding: '4px 10px',
-                borderRadius: '999px',
-                fontSize: '12px',
-                fontWeight: 600,
-                display: 'inline-flex',
+            {/* Audio Waveform Equalizer Bars */}
+            <div
+              style={{
+                display: 'flex',
                 alignItems: 'center',
-                gap: '4px',
-                boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
-              }}>
-                <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--tertiary)' }}>chat</span>
-                Intent: {activeItem.detected_intent}
-              </span>
-              <span style={{
-                backgroundColor: 'var(--surface-container-lowest)',
-                color: 'var(--on-surface)',
-                padding: '4px 10px',
-                borderRadius: '999px',
-                fontSize: '12px',
-                fontWeight: 600,
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px',
-                boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
-              }}>
-                <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--primary)' }}>person</span>
-                Context: Work → Rahul
-              </span>
+                justifyContent: 'center',
+                gap: '5px',
+                height: '24px',
+                marginBottom: '20px',
+              }}
+            >
+              {[12, 18, 24, 16, 22, 14, 20, 12, 16].map((h, i) => (
+                <span
+                  key={i}
+                  style={{
+                    width: '4px',
+                    borderRadius: '999px',
+                    backgroundColor: isRecording ? '#dc2626' : i % 2 === 0 ? '#93721b' : '#c9a44c',
+                    height: isRecording
+                      ? `${Math.max(8, Math.sin(i * 1.5 + Date.now() / 120) * 18 * (volumeLevel + 0.4) + 10)}px`
+                      : `${h * 0.7}px`,
+                    transition: 'height 0.1s ease',
+                  }}
+                />
+              ))}
             </div>
-          </div>
 
-          {/* Autonomy Protocol Notice */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            padding: '8px 12px',
-            backgroundColor: 'var(--surface-container)',
-            borderRadius: '8px',
-            fontSize: '12px',
-            color: 'var(--on-surface-variant)'
-          }}>
-            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>shield</span>
-            <span>Protocol: AI Proposes • You Confirm • Second Voice Executes</span>
-          </div>
-
-          {/* Action Execution Controls */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {/* Primary Speak Button */}
-            <button
-              id="speakBtn"
-              onClick={() => handleSpeak(activeItem.reconstructed_text)}
+            {/* Bottom Keyboard Input - Synchronized live */}
+            <form
+              onSubmit={handleFragmentSubmit}
               style={{
                 width: '100%',
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center',
+                backgroundColor: isRecording ? '#fff7ed' : '#faf7f2',
+                borderRadius: '14px',
+                padding: '5px 6px 5px 14px',
+                border: isRecording ? '1.5px solid #fdba74' : '1px solid #e7e1d6',
+                transition: 'all 0.2s ease',
+              }}
+            >
+              <span
+                className="material-symbols-outlined"
+                style={{
+                  fontSize: '20px',
+                  color: isRecording ? '#ea580c' : '#827c71',
+                  marginRight: '8px',
+                }}
+              >
+                {isRecording ? 'graphic_eq' : 'keyboard'}
+              </span>
+              <input
+                type="text"
+                placeholder={isRecording ? 'Hearing your voice live...' : "or type raw words e.g. 'hello i am karan'..."}
+                value={fragmentInput}
+                onChange={(e) => handleInputChange(e.target.value)}
+                disabled={isProcessing}
+                style={{
+                  flex: 1,
+                  backgroundColor: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: '14px',
+                  fontWeight: isRecording ? 600 : 400,
+                  color: '#1a1a19',
+                  minHeight: '38px',
+                }}
+              />
+              <button
+                type="submit"
+                disabled={isProcessing || !fragmentInput.trim()}
+                style={{
+                  width: '38px',
+                  height: '38px',
+                  borderRadius: '10px',
+                  backgroundColor: '#93721b',
+                  color: '#ffffff',
+                  border: 'none',
+                  cursor: isProcessing || !fragmentInput.trim() ? 'default' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                  opacity: fragmentInput.trim() ? 1 : 0.6,
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>
+                  arrow_forward
+                </span>
+              </button>
+            </form>
+          </section>
+
+          {/* Card 2: Quick Express */}
+          <section
+            style={{
+              backgroundColor: '#ffffff',
+              borderRadius: '24px',
+              padding: '20px 24px',
+              border: '1px solid #ede7df',
+              boxShadow: '0 2px 12px rgba(119, 90, 1, 0.03)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '14px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#93721b' }}>
+                  bolt
+                </span>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '15px',
+                    fontWeight: 800,
+                    color: '#1a1a19',
+                  }}
+                >
+                  Quick Express
+                </span>
+              </div>
+
+              <button
+                onClick={() => onNavigateTab('vocabulary')}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#93721b',
+                  fontFamily: 'var(--font-heading)',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                <span>Manage Phrases</span>
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+                  arrow_forward
+                </span>
+              </button>
+            </div>
+
+            {/* Quick Phrase Pills */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
                 gap: '8px',
-                padding: '14px 18px',
-                backgroundColor: 'var(--primary)',
-                color: 'var(--on-primary)',
+              }}
+            >
+              {[
+                { icon: 'medical_services', label: 'Doctor ...', phrase: 'I have a doctor appointment scheduled.' },
+                { icon: 'replay', label: 'Please r...', phrase: 'Could you please repeat what you just said?' },
+                { icon: 'edit_note', label: 'I am typ...', phrase: 'Please give me a moment, I am typing a response.' },
+                { icon: 'hourglass_empty', label: 'Need a ...', phrase: 'I need a moment to formulate my response.' },
+              ].map((item, idx) => (
+                <button
+                  key={idx}
+                  onClick={async () => {
+                    setFragmentInput(item.phrase);
+                    setIsProcessing(true);
+                    showToast('Playing quick express phrase...');
+                    try {
+                      const res = await reconstructText(item.phrase, activeContext, profile);
+                      setActiveItem(res);
+                      handleSpeak(res.reconstructed_text, res.audio_base64);
+                    } catch (e) {
+                      handleSpeak(item.phrase);
+                    } finally {
+                      setIsProcessing(false);
+                    }
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    padding: '10px 12px',
+                    backgroundColor: '#fbf8f4',
+                    borderRadius: '12px',
+                    border: '1px solid #ede7df',
+                    color: '#2a2723',
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '17px', color: '#736d62' }}>
+                    {item.icon}
+                  </span>
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+
+        {/* RIGHT COLUMN: Live Reconstruction Card + Ambient Noise Card */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          
+          {/* Card 1: Live Reconstruction Card */}
+          <section
+            style={{
+              backgroundColor: '#ffffff',
+              borderRadius: '24px',
+              padding: '24px',
+              border: '1px solid #ede7df',
+              boxShadow: '0 2px 12px rgba(119, 90, 1, 0.03)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px',
+            }}
+          >
+            {/* Header with Title & AI Confidence */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '20px', color: '#93721b' }}>
+                  graphic_eq
+                </span>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '16px',
+                    fontWeight: 800,
+                    color: '#1a1a19',
+                  }}
+                >
+                  Live Reconstruction
+                </span>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  backgroundColor: '#fef3c7',
+                  color: '#92400e',
+                  padding: '3px 10px',
+                  borderRadius: '999px',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                }}
+              >
+                <span
+                  style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    backgroundColor: '#b45309',
+                    display: 'inline-block',
+                  }}
+                />
+                <span>AI Confidence {Math.round((activeItem?.confidence || 0.96) * 100)}%</span>
+              </div>
+            </div>
+
+            {/* Acoustic Input Phonemes Box */}
+            <div
+              style={{
+                backgroundColor: isRecording ? '#fff7ed' : '#faf7f2',
+                borderRadius: '16px',
+                padding: '14px 16px',
+                border: isRecording ? '1.5px solid #fdba74' : '1px solid #ede7df',
+                transition: 'all 0.2s ease',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '11px',
+                    fontWeight: 800,
+                    letterSpacing: '0.06em',
+                    color: '#7a7368',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {isRecording ? '● LISTENING TO SPEECH:' : 'ACOUSTIC INPUT PHONEMES:'}
+                </span>
+                <span
+                  className="material-symbols-outlined"
+                  style={{ fontSize: '18px', color: isRecording ? '#dc2626' : '#93721b' }}
+                >
+                  mic
+                </span>
+              </div>
+              <p
+                style={{
+                  fontFamily: 'var(--font-body)',
+                  fontSize: '15px',
+                  fontWeight: 600,
+                  fontStyle: 'italic',
+                  color: isRecording ? '#9a3412' : '#38332a',
+                  wordBreak: 'break-word',
+                }}
+              >
+                “{activeItem?.raw_transcript || 'Type or speak words...'}”
+                {isRecording && <span className="animate-pulse" style={{ fontWeight: 800, color: '#dc2626' }}>|</span>}
+              </p>
+            </div>
+
+            {/* Downward Transformation Indicator */}
+            <div style={{ display: 'flex', justifyContent: 'center', margin: '-4px 0' }}>
+              <div
+                style={{
+                  width: '28px',
+                  height: '28px',
+                  borderRadius: '50%',
+                  backgroundColor: '#f4ede2',
+                  color: '#93721b',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+                  arrow_downward
+                </span>
+              </div>
+            </div>
+
+            {/* Reconstructed Sentence Box */}
+            <div
+              style={{
+                backgroundColor: '#fcf6e9',
+                borderRadius: '18px',
+                padding: '18px',
+                border: '1px solid #f2e2be',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '11px',
+                    fontWeight: 800,
+                    letterSpacing: '0.06em',
+                    color: '#8c6913',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  RECONSTRUCTED SENTENCE
+                </span>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span
+                    style={{
+                      backgroundColor: '#ebdcb6',
+                      color: '#6e550e',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      padding: '2px 8px',
+                      borderRadius: '999px',
+                    }}
+                  >
+                    Neural v3.4
+                  </span>
+                  <button
+                    onClick={handleRegenerate}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#8c6913',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '2px',
+                    }}
+                    title="Regenerate sentence"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>
+                      refresh
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <p
+                style={{
+                  fontFamily: 'var(--font-body)',
+                  fontSize: '17px',
+                  fontWeight: 700,
+                  color: '#1a1a19',
+                  lineHeight: 1.45,
+                  marginBottom: '14px',
+                }}
+              >
+                “{activeItem?.reconstructed_text || 'Ready to reconstruct your speech.'}”
+              </p>
+
+              {/* Tags: Intent & Context */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <span
+                  style={{
+                    backgroundColor: '#ffffff',
+                    color: '#2a2723',
+                    padding: '4px 12px',
+                    borderRadius: '999px',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    border: '1px solid #ede7df',
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '15px', color: '#3c6847' }}>
+                    chat_bubble_outline
+                  </span>
+                  Intent: {activeItem?.detected_intent || 'General'}
+                </span>
+
+                <span
+                  style={{
+                    backgroundColor: '#ffffff',
+                    color: '#2a2723',
+                    padding: '4px 12px',
+                    borderRadius: '999px',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    border: '1px solid #ede7df',
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '15px', color: '#93721b' }}>
+                    category
+                  </span>
+                  Context: {activeContext}
+                </span>
+              </div>
+            </div>
+
+            {/* Autonomy Protocol Box */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '10px 14px',
+                backgroundColor: '#f6f1e8',
                 borderRadius: '12px',
+                fontSize: '12px',
+                fontWeight: 600,
+                color: '#4f4a41',
+              }}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '16px', color: '#736d62' }}>
+                shield
+              </span>
+              <span>Protocol: AI Proposes • You Confirm • Second Voice Executes</span>
+            </div>
+
+            {/* Primary Action Button: Speak Out Loud */}
+            <button
+              id="mainSpeakBtn"
+              onClick={() => handleSpeak(activeItem?.reconstructed_text || '', activeItem?.audio_base64)}
+              style={{
+                width: '100%',
+                height: '52px',
+                backgroundColor: '#775a01',
+                color: '#ffffff',
+                borderRadius: '14px',
                 border: 'none',
                 cursor: 'pointer',
                 fontFamily: 'var(--font-heading)',
-                fontSize: '16px',
-                fontWeight: 700,
-                boxShadow: '0 2px 8px rgba(119, 90, 1, 0.2)',
-                minHeight: '52px'
+                fontSize: '15px',
+                fontWeight: 800,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 14px rgba(119, 90, 1, 0.25)',
+                transition: 'all 0.15s ease',
               }}
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '24px' }}>volume_up</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '22px' }}>
+                volume_up
+              </span>
               <span>Speak Out Loud</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '20px', marginLeft: '2px' }}>
+                arrow_forward
+              </span>
             </button>
 
-            {/* Secondary Actions 2x2 Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+            {/* Secondary Action Grid (2x2) */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
               <button
-                onClick={() => showToast('Dispatched to Rahul via Slack/Email!')}
+                onClick={() => showToast('Dispatched sentence to audience!')}
                 style={{
+                  height: '44px',
+                  backgroundColor: '#fbf8f4',
+                  borderRadius: '12px',
+                  border: '1px solid #ede7df',
+                  color: '#2a2723',
+                  fontFamily: 'var(--font-heading)',
+                  fontSize: '13px',
+                  fontWeight: 700,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '6px',
-                  padding: '10px 8px',
-                  backgroundColor: 'var(--surface-container-low)',
-                  color: 'var(--on-surface)',
-                  borderRadius: '10px',
-                  border: '1px solid var(--outline-variant)',
                   cursor: 'pointer',
-                  fontWeight: 600,
-                  fontSize: '13px'
                 }}
               >
-                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: 'var(--tertiary)' }}>send</span>
-                <span>Send to Rahul</span>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#3c6847' }}>
+                  send
+                </span>
+                <span>Send Message</span>
               </button>
 
               <button
-                id="copyBtn"
                 onClick={handleCopy}
                 style={{
+                  height: '44px',
+                  backgroundColor: '#fbf8f4',
+                  borderRadius: '12px',
+                  border: '1px solid #ede7df',
+                  color: '#2a2723',
+                  fontFamily: 'var(--font-heading)',
+                  fontSize: '13px',
+                  fontWeight: 700,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '6px',
-                  padding: '10px 8px',
-                  backgroundColor: 'var(--surface-container-low)',
-                  color: 'var(--on-surface)',
-                  borderRadius: '10px',
-                  border: '1px solid var(--outline-variant)',
                   cursor: 'pointer',
-                  fontWeight: 600,
-                  fontSize: '13px'
                 }}
               >
-                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>content_copy</span>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#736d62' }}>
+                  content_copy
+                </span>
                 <span>Copy Text</span>
               </button>
 
               <button
-                onClick={() => setFragmentInput(activeItem.reconstructed_text)}
+                onClick={handleRefine}
                 style={{
+                  height: '44px',
+                  backgroundColor: '#fbf8f4',
+                  borderRadius: '12px',
+                  border: '1px solid #ede7df',
+                  color: '#2a2723',
+                  fontFamily: 'var(--font-heading)',
+                  fontSize: '13px',
+                  fontWeight: 700,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '6px',
-                  padding: '10px 8px',
-                  backgroundColor: 'var(--surface-container-low)',
-                  color: 'var(--on-surface)',
-                  borderRadius: '10px',
-                  border: '1px solid var(--outline-variant)',
                   cursor: 'pointer',
-                  fontWeight: 600,
-                  fontSize: '13px'
                 }}
               >
-                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>edit</span>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#736d62' }}>
+                  edit
+                </span>
                 <span>Refine / Edit</span>
               </button>
 
               <button
                 onClick={handleToggleRecord}
                 style={{
+                  height: '44px',
+                  backgroundColor: '#fbf8f4',
+                  borderRadius: '12px',
+                  border: '1px solid #ede7df',
+                  color: '#2a2723',
+                  fontFamily: 'var(--font-heading)',
+                  fontSize: '13px',
+                  fontWeight: 700,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '6px',
-                  padding: '10px 8px',
-                  backgroundColor: 'var(--surface-container-low)',
-                  color: 'var(--on-surface)',
-                  borderRadius: '10px',
-                  border: '1px solid var(--outline-variant)',
                   cursor: 'pointer',
-                  fontWeight: 600,
-                  fontSize: '13px'
                 }}
               >
-                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>restart_alt</span>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#736d62' }}>
+                  restart_alt
+                </span>
                 <span>Try Again</span>
               </button>
             </div>
-          </div>
-        </section>
-      )}
+          </section>
 
-      {/* Quick Express Phrases */}
-      <section style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{
-            fontFamily: 'var(--font-heading)',
-            fontSize: '16px',
-            fontWeight: 700,
-            color: 'var(--on-surface)'
-          }}>
-            Quick Express
-          </span>
-          <button
-            onClick={() => onNavigateTab('vocabulary')}
+          {/* Card 2: Ambient Noise Card (Bottom Right) */}
+          <section
             style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--primary)',
-              fontFamily: 'var(--font-heading)',
-              fontSize: '13px',
-              fontWeight: 700,
-              cursor: 'pointer'
+              backgroundColor: '#ffffff',
+              borderRadius: '20px',
+              padding: '16px 20px',
+              border: '1px solid #ede7df',
+              boxShadow: '0 2px 10px rgba(0,0,0,0.02)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
             }}
           >
-            Manage Vocabulary
-          </button>
-        </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+              <div
+                style={{
+                  width: '42px',
+                  height: '42px',
+                  borderRadius: '12px',
+                  backgroundColor: '#eaf6ec',
+                  color: '#246b33',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '24px' }}>
+                  hearing
+                </span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-heading)',
+                    fontSize: '14px',
+                    fontWeight: 700,
+                    color: '#1a1a19',
+                  }}
+                >
+                  Ambient Noise: Low
+                </span>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-body)',
+                    fontSize: '12px',
+                    color: '#706a60',
+                  }}
+                >
+                  Speech signal-to-noise ratio: Optimal
+                </span>
+              </div>
+            </div>
 
-        <div style={{
-          display: 'flex',
-          gap: '8px',
-          overflowX: 'auto',
-          paddingBottom: '4px'
-        }}>
-          {[
-            { icon: 'medical_services', color: 'var(--tertiary)', text: 'Doctor appointment' },
-            { icon: 'replay', color: 'var(--primary)', text: 'Please repeat that' },
-            { icon: 'local_drink', color: 'var(--primary)', text: 'Need water' },
-            { icon: 'favorite', color: 'var(--tertiary)', text: 'Thank you' },
-          ].map((item, i) => (
             <button
-              key={i}
-              onClick={() => handleSpeak(item.text)}
+              onClick={() => onNavigateTab('calibration')}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '10px 16px',
-                backgroundColor: 'var(--surface-container-lowest)',
-                color: 'var(--on-surface)',
-                borderRadius: '999px',
-                border: '1px solid var(--outline-variant)',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+                background: 'none',
+                border: 'none',
+                color: '#775a01',
+                fontFamily: 'var(--font-heading)',
+                fontSize: '13px',
+                fontWeight: 700,
                 cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                fontWeight: 600,
-                fontSize: '14px',
-                flexShrink: 0
+                padding: '6px 10px',
+                borderRadius: '8px',
               }}
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '18px', color: item.color }}>
-                {item.icon}
-              </span>
-              <span>{item.text}</span>
+              Recalibrate
             </button>
-          ))}
+          </section>
         </div>
-      </section>
+      </div>
 
       {/* Floating Toast Alert */}
       {toastMessage && (
-        <div style={{
-          position: 'fixed',
-          bottom: '96px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 60,
-          backgroundColor: 'var(--inverse-surface)',
-          color: 'var(--inverse-on-surface)',
-          padding: '10px 20px',
-          borderRadius: '12px',
-          boxShadow: '0 4px 16px rgba(0,0,0,0.2)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          fontSize: '14px',
-          fontWeight: 600,
-          whiteSpace: 'nowrap',
-          transition: 'all 0.2s ease'
-        }}>
-          <span className="material-symbols-outlined" style={{ fontSize: '20px', color: 'var(--tertiary-fixed)' }}>
-            check_circle
+        <div
+          style={{
+            position: 'fixed',
+            bottom: '32px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 100,
+            backgroundColor: '#1c1b1a',
+            color: '#fdf8f5',
+            padding: '12px 24px',
+            borderRadius: '14px',
+            boxShadow: '0 6px 24px rgba(0,0,0,0.25)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            fontSize: '14px',
+            fontWeight: 600,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '20px', color: '#c9a44c' }}>
+            info
           </span>
           <span>{toastMessage}</span>
         </div>
