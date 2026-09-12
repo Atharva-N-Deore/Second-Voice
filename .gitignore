@@ -1,0 +1,29 @@
+# Node dependencies
+node_modules/
+dist/
+build/
+.expo/
+.next/
+
+# Python & virtual environments
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environment variables & secrets (keep private)
+.env
+*.env.local
+
+# ML Models & Checkpoint weights (large files)
+second_voice_whisper_lora/
+*.safetensors
+*.bin
+*.pt
+
+# OS Files
+.DS_Store
+Thumbs.db
